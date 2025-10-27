@@ -127,14 +127,14 @@ BibTeX:
   title        = {Bounded Descent and Symbolic 2--Adic Dynamics in the Collatz Map},
   year         = {2025},
   note         = {Independent Research, Berlin},
-  url          = {https://zenodo.org/your_dataset_link_here}
+  url          = {}
 }
 ```
 📬 Contact
 
 For questions or collaboration (e.g., formal verification in Lean/Coq):
 Julian Haberkorn — Berlin, Germany
-Email: [your contact email or GitHub link]
+Email: [haberkornj@posteo.de]
 
 🧠 References
 
