@@ -118,7 +118,7 @@ If you use or build upon this work, please cite:
 Julian Haberkorn (2025).
 Bounded Descent and Symbolic 2-Adic Dynamics in the Collatz Map.
 Independent Research Report, Berlin.
-[arXiv / Zenodo link TBD].
+[ DOI: 10.5281/zenodo.17463315].
 
 BibTeX:
 ```bash
