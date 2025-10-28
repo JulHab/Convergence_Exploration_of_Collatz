@@ -138,10 +138,10 @@ Email: [haberkornj@posteo.de]
 
 🧠 References
 
-T. Oliveira e Silva, S. Herzog, R. P. Rohrbach,
-Empirical verification of the 3x+1 and related conjectures,
-Mathematics of Computation, 80(273):941–947, 2011.
-DOI: 10.1090/S0025-5718-2010-02413-X
+Gary T. Leavens, Michael Vermeulen. 3x + 1 Search Programs Computers Mathematics
+with Applications 24 (11) (1992): 79–99. https://doi.org/10.1016/
+0898-1221(92)90034-F
+6
 
 J. C. Lagarias, The 3x+1 problem and its generalizations,
 American Mathematical Monthly, 92(1), 3–23 (1985).
