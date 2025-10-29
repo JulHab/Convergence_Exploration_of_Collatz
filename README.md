@@ -35,7 +35,7 @@ A deterministic breadth-first search explores all residue classes up to a chosen
 | Observed maximal depth | `K*` | **237** |
 | Max 2-adic burst `ν₂(3n+1)` | ≤ 10 (global), 6 (on deepest branch) |
 | Undominated survivors | 0 |
-| Verified base range | N = 10⁶  (inside verified range up to 10^8 \[[Gary T. Leavens, Michael Vermeulen.](https://doi.org/10.1016/0898-1221(92)90034-F6)\]) |
+| Verified base range | N = 10⁶  (inside verified range up to 10^8 \[[Gary T. Leavens, Michael Vermeulen.](https://doi.org/10.1016/0898-1221(92)90034-F)\]) |
 
 The search shows that **no non-contractive branch** survives beyond depth 237 even when seeding all 2³⁰ residue classes.  
 This provides a reproducible **bounded-descent certificate** consistent with universal Collatz convergence.
@@ -139,9 +139,8 @@ Email: [haberkornj@posteo.de]
 🧠 References
 
 Gary T. Leavens, Michael Vermeulen. 3x + 1 Search Programs Computers Mathematics
-with Applications 24 (11) (1992): 79–99. https://doi.org/10.1016/
-0898-1221(92)90034-F
-6
+with Applications 24 (11) (1992): 79–99. https://doi.org/10.1016/0898-1221(92)90034-F
+
 
 J. C. Lagarias, The 3x+1 problem and its generalizations,
 American Mathematical Monthly, 92(1), 3–23 (1985).
