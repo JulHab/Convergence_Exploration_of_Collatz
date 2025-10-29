@@ -35,7 +35,7 @@ A deterministic breadth-first search explores all residue classes up to a chosen
 | Observed maximal depth | `K*` | **237** |
 | Max 2-adic burst `ν₂(3n+1)` | ≤ 10 (global), 6 (on deepest branch) |
 | Undominated survivors | 0 |
-| Verified base range | N = 10⁶  (inside verified range up to 10^8 \[[Gary T. Leavens, Michael Vermeulen.](https://doi.org/10.1016/0898-1221(92)90034-F)\]) |
+| Verified base range | N = 10⁶  (inside verified range up to 10^9 \[[Gary T. Leavens, Michael Vermeulen.](https://doi.org/10.1016/0898-1221(92)90034-F)\]) |
 
 The search shows that **no non-contractive branch** survives beyond depth 237 even when seeding all 2³⁰ residue classes.  
 This provides a reproducible **bounded-descent certificate** consistent with universal Collatz convergence.
@@ -100,7 +100,7 @@ these finite conditions.
 The associated paper proves:
 
 If the above lemmas hold for some finite K and N, and all x < N
-are known to reach 1 (verified empirically up to 10^8),
+are known to reach 1 (verified empirically up to 10^9),
 then every positive integer eventually reaches 1.
 
 Formal verification would involve:
