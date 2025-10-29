@@ -72,7 +72,7 @@ This provides a reproducible **bounded-descent certificate** consistent with uni
 
 ### 2. Run
 ```bash
-python3 src/collatz_monster_search.py --config config.json
+python3 collatz_monster_search.py --config config.json
 ```
 ### 3. Output
 
