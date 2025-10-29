@@ -100,7 +100,7 @@ these finite conditions.
 The associated paper proves:
 
 If the above lemmas hold for some finite K and N, and all x < N
-are known to reach 1 (verified empirically up to 2⁶⁸ ≈ 3×10²⁰),
+are known to reach 1 (verified empirically up to 10^8),
 then every positive integer eventually reaches 1.
 
 Formal verification would involve:
