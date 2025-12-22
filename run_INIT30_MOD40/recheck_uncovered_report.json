@@ -1,0 +1,12 @@
+{
+  "run_dir": ".\\run_INIT30_MOD40\\",
+  "MAX_DEPTH": 300,
+  "MOD_BITS": 40,
+  "BASIN_CUTOFF": 1000000,
+  "uncovered_seeds_checked": 274972,
+  "monsters_found": 0,
+  "monster_seeds": [],
+  "deepest_depth_seen": 145,
+  "deepest_seed": 704994303,
+  "direct_prune_witnesses_found": 274972
+}

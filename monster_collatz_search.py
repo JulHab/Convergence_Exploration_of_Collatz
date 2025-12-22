@@ -1,6 +1,10 @@
-import math
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import json
 import os
+import gzip
+import hashlib
 from collections import deque, defaultdict
 from dataclasses import dataclass, asdict
 from typing import Optional, List, Dict, Tuple
@@ -11,423 +15,395 @@ from typing import Optional, List, Dict, Tuple
 
 @dataclass
 class RunConfig:
-    BASIN_CUTOFF: int      # n0 must be >= this for "universal contraction"
-    MAX_DEPTH: int         # if a branch survives this many macro-steps unpruned => monster
-    MOD_BITS: int          # how many low bits of n we track at each step
-    INIT_BITS: int         # how many low bits of the initial n0 we seed
-    BATCH_SIZE: int        # how many residues per batch
-    DEPTH_LOG_THRESHOLD: int  # print progress only after this depth
-    OUTPUT_DIR: str        # where to dump all artifacts
+    BASIN_CUTOFF: int
+    MAX_DEPTH: int
+    MOD_BITS: int
+    INIT_BITS: int
+    BATCH_SIZE: int
+    OUTPUT_DIR: str
+
+    # Output controls
+    WRITE_UNCOVERED: bool
+    UNCOVERED_COMPRESS: bool
+    UNCOVERED_MAX_WRITE: int     # cap how many uncovered seeds to write per batch (0 = no cap)
+
+    # Safety valve
+    MAX_QUEUE_STATES_SOFTCAP: int  # 0 disables
+
+    # Hash/commitment controls
+    WRITE_HASHES: bool
+    HASH_DIGEST_SIZE: int          # bytes, e.g. 32 = 256-bit
+    HASH_ORDER_INDEPENDENT: bool   # also compute XOR commitment if True
+    HASH_INCLUDE_A: bool           # include A in witness hash payload (recommended True if you store/compute it)
+
+    # Coq proof-log output (bucket witnesses)
+    WRITE_COQ_BUCKETS: bool
+    COQ_BUCKETS_PER_BATCH: bool
+    COQ_WRITE_GLUE_FILE: bool
+    COQ_MODULE_PREFIX: str
+    COQ_BUCKET_TYPE: str           # Coq type name, e.g. "BucketCertificate"
+
 
 def make_default_config() -> RunConfig:
     return RunConfig(
-        BASIN_CUTOFF = 1_000_000,
-        MAX_DEPTH = 300,
-        MOD_BITS = 40,
-        INIT_BITS = 30,
-        BATCH_SIZE = 1_000_000,
-        DEPTH_LOG_THRESHOLD = 120,
-        OUTPUT_DIR = "run_INIT30_MOD40"
+        BASIN_CUTOFF=1_000_000,
+        MAX_DEPTH=300,
+        MOD_BITS=40,
+        INIT_BITS=30,
+        BATCH_SIZE=1_000_000,
+        OUTPUT_DIR="run_INIT30_MOD40",
+
+        WRITE_UNCOVERED=True,
+        UNCOVERED_COMPRESS=True,
+        UNCOVERED_MAX_WRITE=0,        # 0 = unlimited
+
+        MAX_QUEUE_STATES_SOFTCAP=0,   # set e.g. 25_000_000 if you want a cap
+
+        WRITE_HASHES=True,
+        HASH_DIGEST_SIZE=32,
+        HASH_ORDER_INDEPENDENT=True,
+        HASH_INCLUDE_A=True,
+
+        WRITE_COQ_BUCKETS=True,
+        COQ_BUCKETS_PER_BATCH=True,
+        COQ_WRITE_GLUE_FILE=True,
+        COQ_MODULE_PREFIX="BucketWitnesses",
+        COQ_BUCKET_TYPE="BucketCertificate",
     )
 
 # ============================================================
-# 2. CORE MATH MODEL
+# 2. CORE MATH
 # ============================================================
 
 def trailing_zeros_2(x: int) -> int:
-    """Return ν₂(x): the exponent of 2 in x (number of trailing zero bits)."""
     c = 0
     while (x & 1) == 0:
         x >>= 1
         c += 1
     return c
 
+
 @dataclass
 class State:
-    """
-    Symbolic Collatz prefix state.
-
-    We encode the value after `depth` macro-steps as:
-
-        n(depth) = (A * n0 + b) / 2^t
-
-    where:
-        - a  = number of odd (3n+1) steps so far
-        - t  = total number of factor-2 divisions so far
-        - A  = 3^a  (this is enforced algebraically)
-        - b  = accumulated affine offset
-        - n_mod = current n(depth) modulo 2^MOD_BITS
-        - v2_last = ν₂(3n+1) used at the most recent odd step
-                    (None if the last step was even)
-
-    This representation lets us talk about *all* starting n0 at once.
-    """
     a: int
     t: int
-    A: int         # should always equal 3**a
+    A: int
     b: int
     n_mod: int
     depth: int
-    parent: Optional["State"]
     v2_last: Optional[int]
+    seed: int  # absolute seed value
 
-    def key_for_registry(self) -> Tuple[int, int]:
-        return (self.n_mod, self.depth)
-
-def assert_state_invariants(st: State):
-    # Debug-facing invariant check. This can be turned off in production.
-    # Ensures internal algebra hasn't drifted.
-    if pow(3, st.a) != st.A:
-        raise RuntimeError(f"Invariant A=3^a violated at depth {st.depth}")
 
 def prune_check(st: State, cfg: RunConfig) -> bool:
-    """
-    Universal contraction test.
-
-    After this prefix we have:
-        n = (3^a * n0 + b) / 2^t.
-
-    If 2^t > 3^a and b / (2^t - 3^a) < BASIN_CUTOFF,
-    then for *every* n0 >= BASIN_CUTOFF we get n < n0.
-
-    In that case, THIS PREFIX ALONE proves 'you are coming down',
-    so we do not need to extend this branch further.
-    """
-    A = st.A
     two_t = 1 << st.t
-    if two_t <= A:
+    if two_t <= st.A:
         return False
+    delta = two_t - st.A
+    return st.b < cfg.BASIN_CUTOFF * delta
 
-    delta = two_t - A  # strictly >0 now
-    # we want b / delta < BASIN_CUTOFF  <=>  b < BASIN_CUTOFF * delta
-    if st.b < cfg.BASIN_CUTOFF * delta:
-        return True
-    return False
 
 def step_once(st: State, cfg: RunConfig, mod_mask: int) -> State:
-    """
-    Advance one macro-step of the Collatz map, but symbolically.
-
-    Rule per macro-step:
-      - If n is even:    n -> n/2 (exactly one halving)
-      - If n is odd:     n -> (3n+1)/2^v, where v = ν₂(3n+1)
-
-    We update:
-      a, t, A=3^a, b, n_mod, depth, v2_last
-    """
-    a = st.a
-    t = st.t
-    A = st.A
-    b = st.b
     n_mod = st.n_mod
-    depth = st.depth
 
+    # even
     if (n_mod & 1) == 0:
-        # even step: divide by 2 exactly once
-        new_a = a
-        new_t = t + 1
-        new_A = A
-        new_b = b
-        new_n_mod = (n_mod >> 1) & mod_mask
-        v2_used = None
+        return State(
+            a=st.a,
+            t=st.t + 1,
+            A=st.A,
+            b=st.b,
+            n_mod=(n_mod >> 1) & mod_mask,
+            depth=st.depth + 1,
+            v2_last=None,
+            seed=st.seed,
+        )
+
+    # odd
+    tmp = 3 * n_mod + 1
+    tmp_masked = tmp & mod_mask
+    if tmp_masked == 0:
+        v_local = cfg.MOD_BITS
     else:
-        # odd step: n -> (3n+1)/2^v, v = ν₂(3n+1)
-        tmp = 3 * n_mod + 1
-        tmp_masked = tmp & mod_mask
+        v_local = trailing_zeros_2(tmp_masked)
 
-        if tmp_masked == 0:
-            # Means (3*n_mod+1) is 0 mod 2^MOD_BITS.
-            # Actual ν₂(tmp) >= MOD_BITS. We conservatively
-            # take v_local = MOD_BITS. This is allowed because
-            # *larger* v only makes the branch 'easier to kill'.
-            v_local = cfg.MOD_BITS
-        else:
-            v_local = trailing_zeros_2(tmp_masked)
-
-        new_a = a + 1
-        new_t = t + v_local
-        new_A = A * 3
-        # Derivation:
-        # n_old = (A n0 + b)/2^t
-        # 3 n_old + 1 = (3A n0 + 3b + 2^t)/2^t
-        # divide by 2^v_local:
-        # => n_new = (3A n0 + 3b + 2^t)/2^(t+v_local)
-        new_b = 3 * b + (1 << t)
-
-        new_n_mod = (tmp_masked >> v_local) & mod_mask
-        v2_used = v_local
-
-    nxt = State(
-        a=new_a,
-        t=new_t,
-        A=new_A,
-        b=new_b,
-        n_mod=new_n_mod,
-        depth=depth + 1,
-        parent=st,
-        v2_last=v2_used
+    return State(
+        a=st.a + 1,
+        t=st.t + v_local,
+        A=st.A * 3,
+        b=3 * st.b + (1 << st.t),
+        n_mod=(tmp_masked >> v_local) & mod_mask,
+        depth=st.depth + 1,
+        v2_last=v_local,
+        seed=st.seed,
     )
 
-    # Optional safety check
-    # assert_state_invariants(nxt)
-
-    return nxt
 
 def dominates(hard: State, soft: State) -> bool:
-    """
-    Dominance partial order.
-
-    We say 'hard' dominates 'soft' if hard is at least as "resistant
-    to pruning" in all three of these senses (and strictly better in ≥1):
-
-      - Larger A = 3^a  (more multiplicative growth)
-      - Smaller t       (fewer halvings so far)
-      - Larger b        (bigger offset, can keep threshold higher)
-
-    Intuition:
-      If 'hard' dominates 'soft', then any future extension of 'soft'
-      cannot survive pruning longer than some extension of 'hard',
-      so 'soft' is redundant and can be discarded.
-    """
-    cond = (
-        (hard.A >= soft.A) and
-        (hard.t <= soft.t) and
-        (hard.b >= soft.b)
-    )
-    strict = (
-        (hard.A > soft.A) or
-        (hard.t < soft.t) or
-        (hard.b > soft.b)
-    )
+    cond = (hard.A >= soft.A) and (hard.t <= soft.t) and (hard.b >= soft.b)
+    strict = (hard.A > soft.A) or (hard.t < soft.t) or (hard.b > soft.b)
     return cond and strict
 
-def summarize_state_math(st: State) -> Dict[str, float]:
-    """
-    Produce a dictionary of human-readable diagnostics for a state.
-    This is what we log in 'deep_snapshots' and final summaries.
-    """
-    two_t = 1 << st.t
-    delta = two_t - st.A
-    has_contract = (delta > 0)
-    threshold_est = (st.b / delta) if has_contract else None
-    tension = (st.t / (st.a * math.log2(3))) if st.a > 0 else None
 
-    return {
-        "depth": st.depth,
-        "a": st.a,
-        "t": st.t,
-        "A": st.A,
-        "b": st.b,
-        "delta": delta,
-        "has_contract": has_contract,
-        "threshold_est": threshold_est,
-        "tension": tension,
-        "n_mod": st.n_mod,
-        "v2_last": st.v2_last,
-    }
+def hardness_key(st: State) -> Tuple[int, int, int]:
+    """
+    Larger = harder:
+      - larger A is harder
+      - larger b is harder
+      - smaller t is harder  => use -t
+    """
+    return (st.A, st.b, -st.t)
 
-def reconstruct_path(leaf: Optional[State]) -> List[State]:
-    """
-    Follow parent pointers back to the root and reverse.
-    """
-    out = []
-    cur = leaf
-    while cur is not None:
-        out.append(cur)
-        cur = cur.parent
-    out.reverse()
-    return out
+
+def harder_than(a: State, b: State) -> bool:
+    return hardness_key(a) > hardness_key(b)
 
 # ============================================================
-# 3. BATCH SEARCH
+# 3. HASHING / COMMITMENTS
+# ============================================================
+
+def _blake2b(digest_size: int) -> "hashlib._Hash":
+    return hashlib.blake2b(digest_size=digest_size)
+
+def witness_canonical_bytes(seed: int, st: State, include_A: bool) -> bytes:
+    fields = [
+        ("seed", seed),
+        ("kind", "prune"),
+        ("j", st.depth),
+        ("a", st.a),
+        ("t", st.t),
+        ("b", st.b),
+        ("n_mod", st.n_mod),
+        ("v2_last", st.v2_last if st.v2_last is not None else -1),
+    ]
+    if include_A:
+        fields.append(("A", st.A))
+    return "".join(f"{k}={v}\n" for k, v in fields).encode("ascii")
+
+def witness_digest_hex(seed: int, st: State, cfg: RunConfig) -> str:
+    h = _blake2b(cfg.HASH_DIGEST_SIZE)
+    h.update(witness_canonical_bytes(seed, st, include_A=cfg.HASH_INCLUDE_A))
+    return h.hexdigest()
+
+def xor_hex_digest(current_xor: bytes, new_hex: str) -> bytes:
+    new_bytes = bytes.fromhex(new_hex)
+    return bytes(a ^ b for a, b in zip(current_xor, new_bytes))
+
+def roll_hex_digest(current_roll_hex: str, new_hex: str, cfg: RunConfig) -> str:
+    h = _blake2b(cfg.HASH_DIGEST_SIZE)
+    if current_roll_hex:
+        h.update(bytes.fromhex(current_roll_hex))
+    h.update(bytes.fromhex(new_hex))
+    return h.hexdigest()
+
+# ============================================================
+# 4. COQ EMITTER (Bucket certificates)
+# ============================================================
+
+def coq_z(n: int) -> str:
+    return f"({n})%Z"
+
+def coq_opt_z(v: Optional[int]) -> str:
+    if v is None:
+        return "None"
+    return f"(Some {coq_z(v)})"
+
+def coq_bucket_cert_record(key: Tuple[int, int], st: State) -> str:
+    """
+    IMPORTANT: adjust field names to match your Coq record later.
+    For now we output a generic BucketCertificate record with:
+      n_mod_c, depth_c, a_c, t_c, A_c, b_c, v2_last_c
+    """
+    n_mod, depth = key
+    return (
+        "{| "
+        f"n_mod_c := {coq_z(n_mod)}; "
+        f"depth_c := {coq_z(depth)}; "
+        f"a_c := {coq_z(st.a)}; "
+        f"t_c := {coq_z(st.t)}; "
+        f"A_c := {coq_z(st.A)}; "
+        f"b_c := {coq_z(st.b)}; "
+        f"v2_last_c := {coq_opt_z(st.v2_last)} "
+        "|}"
+    )
+
+def write_coq_bucket_file(path: str, def_name: str,
+                          bucket_items: List[Tuple[Tuple[int, int], State]],
+                          coq_type: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("From Coq Require Import ZArith List.\n")
+        f.write("Import ListNotations.\n")
+        f.write("Open Scope Z_scope.\n\n")
+        f.write("(* Auto-generated bucket witnesses: one hardest-prune witness per (n_mod, depth). *)\n\n")
+        f.write(f"Definition {def_name} : list {coq_type} :=\n")
+        f.write("  [\n")
+        for key, st in bucket_items:
+            f.write("    " + coq_bucket_cert_record(key, st) + ";\n")
+        f.write("  ].\n")
+
+def write_coq_glue_file(path: str, coq_type: str, batch_defs: List[str], batch_modules: List[str]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("From Coq Require Import List.\n")
+        f.write("Import ListNotations.\n\n")
+        f.write("(* Auto-generated glue file: concatenates per-batch bucket certificate lists. *)\n\n")
+        for mod in batch_modules:
+            f.write(f"Require Import {mod}.\n")
+        f.write("\n")
+        f.write(f"Definition collatz_bucket_certs : list {coq_type} :=\n  ")
+        if not batch_defs:
+            f.write("[] .\n")
+            return
+        f.write(" ++\n  ".join(batch_defs))
+        f.write(".\n")
+
+# ============================================================
+# 5. I/O HELPERS
+# ============================================================
+
+def open_textmaybe_gzip(path: str, compress: bool):
+    if compress:
+        return gzip.open(path, "wt", encoding="utf-8")
+    return open(path, "w", encoding="utf-8")
+
+def write_uncovered_jsonl(path: str, seeds: List[int], compress: bool, max_write: int) -> int:
+    if max_write and len(seeds) > max_write:
+        seeds = seeds[:max_write]
+    with open_textmaybe_gzip(path, compress) as f:
+        for s in seeds:
+            f.write(json.dumps({"seed": s}) + "\n")
+    return len(seeds)
+
+# ============================================================
+# 6. BATCH SEARCH (bucket witnesses)
 # ============================================================
 
 @dataclass
 class BatchResult:
     monster_found: bool
     batch_max_depth: int
-    deepest_path: List[State]
-    deep_snapshots: List[Dict[str, float]]
-    survivors_at_depth: Dict[int, int]
-    monster_path: Optional[List[State]]
     max_v2_seen: int
 
-def run_batch(cfg: RunConfig,
-              seed_start: int,
-              seed_end: int) -> BatchResult:
-    """
-    Explore all starting residues n0 in [seed_start, seed_end),
-    each interpreted as "n0 mod 2^INIT_BITS = residue", lifted into
-    our symbolic form.
+    covered_count: int
+    uncovered_count: int
+    uncovered_seeds: List[int]
 
-    We BFS/DFS-like through the symbolic Collatz graph, pruning:
-      - states that already enforce universal contraction,
-      - states dominated by a nastier state at same (n_mod, depth).
+    bucket_witnesses: List[Tuple[Tuple[int, int], State]]
 
-    We track:
-      - whether anything survives past cfg.MAX_DEPTH (monster)
-      - the deepest state reached
-      - ν₂ bursts along that deepest path
-    """
+    batch_hash_roll: str
+    batch_hash_xor: str
 
+
+def run_batch(cfg: RunConfig, seed_start: int, seed_end: int) -> BatchResult:
     MOD_MASK = (1 << cfg.MOD_BITS) - 1
+    batch_size = seed_end - seed_start
+
+    covered = bytearray(batch_size)
+    covered_count = 0
 
     q = deque()
-    frontier_registry = defaultdict(list)
+    frontier: Dict[Tuple[int, int], List[State]] = defaultdict(list)
 
     batch_max_depth = 0
-    survivors_at_depth: Dict[int, int] = {}
-    monster_found = False
-    monster_path = None
+    max_v2 = 0
 
-    best_depth_this_batch = -1
-    deepest_state_this_batch = None
-    deep_snapshots: List[Dict[str, float]] = []
-    max_v2_seen = 0
+    batch_roll = ""
+    batch_xor = bytes([0] * cfg.HASH_DIGEST_SIZE)
 
-    # Initialize seeds for this batch
-    for residue in range(seed_start, seed_end):
+    # Store hardest prune witness per bucket (n_mod, depth)
+    bucket_prune_witness: Dict[Tuple[int, int], State] = {}
+
+    for seed in range(seed_start, seed_end):
         st0 = State(
-            a=0,
-            t=0,
-            A=1,
-            b=0,
-            n_mod=(residue & MOD_MASK),
+            a=0, t=0, A=1, b=0,
+            n_mod=seed & MOD_MASK,
             depth=0,
-            parent=None,
-            v2_last=None
+            v2_last=None,
+            seed=seed,
         )
         q.append(st0)
-        frontier_registry[(st0.n_mod, 0)].append(st0)
-        survivors_at_depth[0] = survivors_at_depth.get(0, 0) + 1
+        frontier[(st0.n_mod, 0)].append(st0)
 
     while q:
+        if cfg.MAX_QUEUE_STATES_SOFTCAP and len(q) > cfg.MAX_QUEUE_STATES_SOFTCAP:
+            raise MemoryError(f"Queue exceeded soft cap {cfg.MAX_QUEUE_STATES_SOFTCAP}.")
+
         st = q.popleft()
-        d = st.depth
-        if d > batch_max_depth:
-            batch_max_depth = d
+        batch_max_depth = max(batch_max_depth, st.depth)
 
-        # Monster detection: survived "too long" without pruning
-        if d >= cfg.MAX_DEPTH:
-            monster_found = True
-            monster_path = reconstruct_path(st)
-            break
-
-        # Universal contraction => prune branch
-        if prune_check(st, cfg):
+        idx = st.seed - seed_start
+        if covered[idx]:
             continue
 
-        # Advance one macro-step
+        if st.depth >= cfg.MAX_DEPTH:
+            uncovered_seeds = [seed_start + i for i in range(batch_size) if not covered[i]]
+            return BatchResult(
+                monster_found=True,
+                batch_max_depth=batch_max_depth,
+                max_v2_seen=max_v2,
+                covered_count=covered_count,
+                uncovered_count=len(uncovered_seeds),
+                uncovered_seeds=uncovered_seeds,
+                bucket_witnesses=sorted(bucket_prune_witness.items(),
+                                       key=lambda kv: (kv[0][1], kv[0][0])),
+                batch_hash_roll=batch_roll,
+                batch_hash_xor=batch_xor.hex(),
+            )
+
+        if prune_check(st, cfg):
+            covered[idx] = 1
+            covered_count += 1
+
+            key = (st.n_mod, st.depth)
+            prev = bucket_prune_witness.get(key)
+            if prev is None or harder_than(st, prev):
+                bucket_prune_witness[key] = st
+
+            # Hash as audit (still per-seed)
+            if cfg.WRITE_HASHES:
+                dhex = witness_digest_hex(st.seed, st, cfg)
+                batch_roll = roll_hex_digest(batch_roll, dhex, cfg)
+                if cfg.HASH_ORDER_INDEPENDENT:
+                    batch_xor = xor_hex_digest(batch_xor, dhex)
+
+            continue
+
         nxt = step_once(st, cfg, MOD_MASK)
-        nd = nxt.depth
+        if nxt.v2_last is not None:
+            max_v2 = max(max_v2, nxt.v2_last)
 
-        # Update best depth / snapshots
-        if nd > best_depth_this_batch:
-            best_depth_this_batch = nd
-            deepest_state_this_batch = nxt
+        key = (nxt.n_mod, nxt.depth)
+        bucket = frontier[key]
 
-            snap = summarize_state_math(nxt)
-            deep_snapshots.append(snap)
+        if any(dominates(old, nxt) for old in bucket):
+            continue
 
-            if nxt.v2_last is not None and nxt.v2_last > max_v2_seen:
-                max_v2_seen = nxt.v2_last
+        frontier[key] = [old for old in bucket if not dominates(nxt, old)] + [nxt]
+        q.append(nxt)
 
-            if nd >= cfg.DEPTH_LOG_THRESHOLD:
-                print(f"[{seed_start}:{seed_end}) NEW BEST DEPTH {nd}")
-                print("   a =", snap["a"], "t =", snap["t"])
-                print("   delta =", snap["delta"])
-                print("   has_contract =", snap["has_contract"],
-                      "threshold_est ~", snap["threshold_est"])
-                print("   tension ~", snap["tension"])
-                print("   last v2 burst =", snap["v2_last"])
-                print("   n_mod =", snap["n_mod"])
-                print()
-
-        # Dominance filtering at key (n_mod, depth)
-        key = (nxt.n_mod, nd)
-
-        keep = True
-        new_bucket = []
-        for old in frontier_registry[key]:
-            if dominates(old, nxt):
-                # an existing state is strictly nastier => drop nxt
-                keep = False
-                break
-
-        if keep:
-            # remove states that nxt dominates
-            for old in frontier_registry[key]:
-                if not dominates(nxt, old):
-                    new_bucket.append(old)
-
-            new_bucket.append(nxt)
-            frontier_registry[key] = new_bucket
-
-            q.append(nxt)
-            survivors_at_depth[nd] = survivors_at_depth.get(nd, 0) + 1
-
-    deepest_path = reconstruct_path(deepest_state_this_batch) if deepest_state_this_batch else []
-
-    # safety: recompute max_v2 on that deepest_path
-    for node in deepest_path:
-        if node.v2_last is not None and node.v2_last > max_v2_seen:
-            max_v2_seen = node.v2_last
-
+    uncovered_seeds = [seed_start + i for i in range(batch_size) if not covered[i]]
     return BatchResult(
-        monster_found=monster_found,
+        monster_found=False,
         batch_max_depth=batch_max_depth,
-        deepest_path=deepest_path,
-        deep_snapshots=deep_snapshots,
-        survivors_at_depth=survivors_at_depth,
-        monster_path=monster_path,
-        max_v2_seen=max_v2_seen
+        max_v2_seen=max_v2,
+        covered_count=covered_count,
+        uncovered_count=len(uncovered_seeds),
+        uncovered_seeds=uncovered_seeds,
+        bucket_witnesses=sorted(bucket_prune_witness.items(),
+                               key=lambda kv: (kv[0][1], kv[0][0])),
+        batch_hash_roll=batch_roll,
+        batch_hash_xor=batch_xor.hex(),
     )
 
 # ============================================================
-# 4. DRIVER
+# 7. DRIVER
 # ============================================================
-
-def ensure_output_dir(cfg: RunConfig):
-    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
-
-def write_path_summary(path: List[State], filename: str):
-    with open(filename, "w") as f:
-        f.write("depth,a,t,v2_last,n_mod,delta,threshold\n")
-        for node in path:
-            two_t = (1 << node.t)
-            delta = two_t - node.A
-            has_contract = (two_t > node.A)
-            thresh = (node.b / delta) if has_contract else None
-            f.write(f"{node.depth},{node.a},{node.t},"
-                    f"{node.v2_last},{node.n_mod},"
-                    f"{delta},{thresh}\n")
-
-def write_v2_profile(path: List[State], max_v2: int, filename: str):
-    with open(filename, "w") as f:
-        f.write("depth,v2_last\n")
-        for node in path:
-            f.write(f"{node.depth},{node.v2_last}\n")
-        f.write(f"\n# max_v2_on_path = {max_v2}\n")
-
-def write_snapshots(snaps: List[Dict[str, float]], filename: str):
-    with open(filename, "w") as f:
-        f.write("depth,a,t,delta,has_contract,threshold_est,tension,v2_last,n_mod\n")
-        for s in snaps:
-            f.write(
-                f"{s['depth']},{s['a']},{s['t']},"
-                f"{s['delta']},{s['has_contract']},"
-                f"{s['threshold_est']},{s['tension']},"
-                f"{s['v2_last']},{s['n_mod']}\n"
-            )
-
-def write_config(cfg: RunConfig):
-    with open(os.path.join(cfg.OUTPUT_DIR, "config.json"), "w") as f:
-        json.dump(asdict(cfg), f, indent=2)
 
 def driver():
     cfg = make_default_config()
-    ensure_output_dir(cfg)
-    write_config(cfg)
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+
+    with open(os.path.join(cfg.OUTPUT_DIR, "config.json"), "w", encoding="utf-8") as f:
+        json.dump(asdict(cfg), f, indent=2)
 
     INIT_MOD = 1 << cfg.INIT_BITS
     total_batches = (INIT_MOD + cfg.BATCH_SIZE - 1) // cfg.BATCH_SIZE
@@ -435,84 +411,146 @@ def driver():
     print(f"INIT_BITS={cfg.INIT_BITS} => {INIT_MOD} residues total.")
     print(f"Processing in {total_batches} batches of size {cfg.BATCH_SIZE}.\n")
 
-    global_best_depth = -1
-    global_best_path: List[State] = []
-    global_best_batch_range = None
-    global_best_snaps: List[Dict[str, float]] = []
-    global_max_v2 = 0
-
+    summaries: List[Dict] = []
     any_monster = False
-    first_monster_info = None  # (batch_range, depth, max_v2, path)
+    global_best_depth = -1
+    global_max_v2 = 0
+    global_uncovered = 0
 
-    for batch_i, start in enumerate(range(0, INIT_MOD, cfg.BATCH_SIZE)):
+    global_roll = ""
+    global_xor = bytes([0] * cfg.HASH_DIGEST_SIZE)
+
+    batch_def_names: List[str] = []
+    batch_module_names: List[str] = []
+
+    for batch_i, start in enumerate(range(0, INIT_MOD, cfg.BATCH_SIZE), start=1):
         end = min(start + cfg.BATCH_SIZE, INIT_MOD)
-        print(f"=== BATCH {batch_i+1}/{total_batches} [{start}:{end}) ===")
+        print(f"=== BATCH {batch_i}/{total_batches} [{start}:{end}) ===")
 
         res = run_batch(cfg, start, end)
 
-        print(f"Batch [{start}:{end}) done.")
-        print("  batch_max_depth:", res.batch_max_depth)
-        print("  monster_found:", res.monster_found)
-        print("  max_v2_seen:", res.max_v2_seen)
+        any_monster |= res.monster_found
+        global_best_depth = max(global_best_depth, res.batch_max_depth)
+        global_max_v2 = max(global_max_v2, res.max_v2_seen)
+        global_uncovered += res.uncovered_count
+
+        # uncovered output
+        unc_path_base = os.path.join(cfg.OUTPUT_DIR, f"uncovered_{start}_{end}.jsonl")
+        unc_path = unc_path_base + (".gz" if cfg.UNCOVERED_COMPRESS else "")
+        written = 0
+        truncated = False
+        if cfg.WRITE_UNCOVERED:
+            written = write_uncovered_jsonl(
+                unc_path,
+                res.uncovered_seeds,
+                compress=cfg.UNCOVERED_COMPRESS,
+                max_write=cfg.UNCOVERED_MAX_WRITE,
+            )
+            truncated = bool(cfg.UNCOVERED_MAX_WRITE and (written < res.uncovered_count))
+
+        # Coq bucket certs output
+        coq_path = None
+        coq_def_name = None
+        if cfg.WRITE_COQ_BUCKETS and cfg.COQ_BUCKETS_PER_BATCH:
+            coq_def_name = f"bucket_witnesses_{start}_{end}"
+            coq_filename = f"{cfg.COQ_MODULE_PREFIX}_{start}_{end}.v"
+            coq_path = os.path.join(cfg.OUTPUT_DIR, coq_filename)
+            write_coq_bucket_file(coq_path, coq_def_name, res.bucket_witnesses, cfg.COQ_BUCKET_TYPE)
+
+            batch_def_names.append(coq_def_name)
+            batch_module_names.append(os.path.splitext(coq_filename)[0])
+
+        # update global commitments
+        if cfg.WRITE_HASHES and res.batch_hash_roll:
+            global_roll = roll_hex_digest(global_roll, res.batch_hash_roll, cfg)
+            if cfg.HASH_ORDER_INDEPENDENT and res.batch_hash_xor:
+                global_xor = xor_hex_digest(global_xor, res.batch_hash_xor)
+
+        summaries.append({
+            "batch": [start, end],
+            "monster_found": res.monster_found,
+            "batch_max_depth": res.batch_max_depth,
+            "max_v2_seen": res.max_v2_seen,
+            "covered_count": res.covered_count,
+            "uncovered_count": res.uncovered_count,
+            "uncovered_path": unc_path if cfg.WRITE_UNCOVERED else None,
+            "uncovered_written": written if cfg.WRITE_UNCOVERED else 0,
+            "uncovered_truncated": truncated,
+            "bucket_witness_count": len(res.bucket_witnesses),
+            "coq_bucket_file": coq_path,
+            "coq_bucket_def": coq_def_name,
+            "batch_hash_roll": res.batch_hash_roll if cfg.WRITE_HASHES else None,
+            "batch_hash_xor": res.batch_hash_xor if (cfg.WRITE_HASHES and cfg.HASH_ORDER_INDEPENDENT) else None,
+        })
+
+        print(f"Batch done: monster={res.monster_found} max_depth={res.batch_max_depth} "
+              f"covered={res.covered_count}/{end-start} uncovered={res.uncovered_count} "
+              f"bucket_witnesses={len(res.bucket_witnesses)}")
+        if cfg.WRITE_HASHES:
+            print(f"  batch_hash_roll={res.batch_hash_roll}")
+            if cfg.HASH_ORDER_INDEPENDENT:
+                print(f"  batch_hash_xor ={res.batch_hash_xor}")
+        if cfg.WRITE_UNCOVERED:
+            print(f"  uncovered_file={unc_path} (written={written}, truncated={truncated})")
+        if cfg.WRITE_COQ_BUCKETS and cfg.COQ_BUCKETS_PER_BATCH:
+            print(f"  coq_bucket_file={coq_path} (def {coq_def_name})")
         print()
 
-        if res.monster_found and not any_monster:
-            any_monster = True
-            depth_monster = res.monster_path[-1].depth if res.monster_path else None
-            first_monster_info = ((start, end), depth_monster, res.max_v2_seen, res.monster_path)
+        if res.monster_found:
+            break
 
-        if res.batch_max_depth > global_best_depth:
-            global_best_depth = res.batch_max_depth
-            global_best_path = res.deepest_path
-            global_best_batch_range = (start, end)
-            global_best_snaps = res.deep_snapshots
-            global_max_v2 = res.max_v2_seen
+    # summaries
+    with open(os.path.join(cfg.OUTPUT_DIR, "batch_summaries.jsonl"), "w", encoding="utf-8") as f:
+        for s in summaries:
+            f.write(json.dumps(s) + "\n")
 
-    # Final reporting
-    print("\n=== GLOBAL SUMMARY ===")
-    print("Any monster?:", any_monster)
-    print("Deepest depth overall:", global_best_depth)
-    print("That depth came from batch range:", global_best_batch_range)
-    print("Global max ν2 burst on that path:", global_max_v2)
+    # glue file
+    if cfg.WRITE_COQ_BUCKETS and cfg.COQ_WRITE_GLUE_FILE and batch_def_names:
+        glue_path = os.path.join(cfg.OUTPUT_DIR, "BucketWitnesses_glue.v")
+        write_coq_glue_file(glue_path, cfg.COQ_BUCKET_TYPE, batch_def_names, batch_module_names)
+        print("Wrote Coq glue file:", glue_path)
 
-    # Write global report
-    with open(os.path.join(cfg.OUTPUT_DIR, "global_report.txt"), "w") as f:
-        f.write(f"any_monster={any_monster}\n")
-        f.write(f"deepest_depth_overall={global_best_depth}\n")
-        f.write(f"best_batch_range={global_best_batch_range}\n")
-        f.write(f"global_max_v2={global_max_v2}\n")
+    # report
+    with open(os.path.join(cfg.OUTPUT_DIR, "report.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "INIT_BITS": cfg.INIT_BITS,
+            "MOD_BITS": cfg.MOD_BITS,
+            "MAX_DEPTH": cfg.MAX_DEPTH,
+            "BASIN_CUTOFF": cfg.BASIN_CUTOFF,
+            "BATCH_SIZE": cfg.BATCH_SIZE,
+            "any_monster": any_monster,
+            "deepest_depth_overall": global_best_depth,
+            "global_max_v2": global_max_v2,
+            "global_uncovered": global_uncovered,
+            "global_hash_roll": global_roll if cfg.WRITE_HASHES else None,
+            "global_hash_xor": global_xor.hex() if (cfg.WRITE_HASHES and cfg.HASH_ORDER_INDEPENDENT) else None,
+            "hash_algo": "blake2b" if cfg.WRITE_HASHES else None,
+            "hash_digest_size": cfg.HASH_DIGEST_SIZE if cfg.WRITE_HASHES else None,
+            "hash_include_A": cfg.HASH_INCLUDE_A if cfg.WRITE_HASHES else None,
+            "coq_bucket_written": bool(cfg.WRITE_COQ_BUCKETS),
+            "coq_bucket_per_batch": bool(cfg.COQ_BUCKETS_PER_BATCH),
+            "coq_bucket_glue_written": bool(cfg.COQ_WRITE_GLUE_FILE and batch_def_names),
+        }, f, indent=2)
 
-        if any_monster and first_monster_info:
-            (rng, dmonster, v2m, mpath) = first_monster_info
-            f.write("\nmonster_batch_range=" + str(rng) + "\n")
-            f.write("monster_depth=" + str(dmonster) + "\n")
-            f.write("monster_max_v2=" + str(v2m) + "\n")
+    print("=== GLOBAL SUMMARY ===")
+    print("any_monster:", any_monster)
+    print("deepest_depth_overall:", global_best_depth)
+    print("global_max_v2:", global_max_v2)
+    print("global_uncovered:", global_uncovered)
+    if cfg.WRITE_HASHES:
+        print("global_hash_roll:", global_roll)
+        if cfg.HASH_ORDER_INDEPENDENT:
+            print("global_hash_xor :", global_xor.hex())
+    print("Wrote:")
+    print(" - config.json")
+    print(" - batch_summaries.jsonl")
+    print(" - uncovered_START_END.jsonl(.gz) per batch")
+    print(" - report.json")
+    if cfg.WRITE_COQ_BUCKETS and cfg.COQ_BUCKETS_PER_BATCH:
+        print(f" - {cfg.COQ_MODULE_PREFIX}_START_END.v per batch (BucketCertificate lists)")
+    if cfg.WRITE_COQ_BUCKETS and cfg.COQ_WRITE_GLUE_FILE:
+        print(" - BucketWitnesses_glue.v")
 
-    # Write deepest path data
-    write_path_summary(
-        global_best_path,
-        os.path.join(cfg.OUTPUT_DIR, "deepest_path_summary.txt")
-    )
-
-    write_v2_profile(
-        global_best_path,
-        global_max_v2,
-        os.path.join(cfg.OUTPUT_DIR, "deepest_path_v2.txt")
-    )
-
-    write_snapshots(
-        global_best_snaps,
-        os.path.join(cfg.OUTPUT_DIR, "deep_snapshots.txt")
-    )
-
-    # Also, if we *did* see any monster (depth >= MAX_DEPTH), dump that path
-    if any_monster and first_monster_info:
-        (_, _, _, mpath) = first_monster_info
-        if mpath:
-            write_path_summary(
-                mpath,
-                os.path.join(cfg.OUTPUT_DIR, "monster_path.txt")
-            )
 
 if __name__ == "__main__":
     driver()

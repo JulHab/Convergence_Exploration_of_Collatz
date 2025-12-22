@@ -1,10 +1,8 @@
--R src Collatz
-src/CollatzBase.v
-src/CollatzState.v
-src/CollatzCertificate.v
-src/CertificateChecker.v
-src/MainTheorem.v
-src/CertificateData.v
-src/BoundedDescentSound.v
+-Q src Collatz
 src/LocalLemmas.v
-src/CollatzGlobal.v
+src/CollatzCore.v
+src/CollatzBase.v
+src/CollatzIter.v
+src/BridgeGlobal.v
+src/CheckerSpec.v
+src/MainTheorem.v

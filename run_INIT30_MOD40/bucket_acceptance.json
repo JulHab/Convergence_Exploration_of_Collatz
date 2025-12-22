@@ -1,0 +1,15 @@
+{
+  "accepted": true,
+  "bucket_file": "/home/julian/Desktop/collatz/Convergence_Exploration_of_Collatz-1.1.0/run_INIT30_MOD40/min_bucket_witnesses.jsonl.gz",
+  "bucket_sha256": "3dcf4829d932f54470f7054b81e5bcd0c032624f1d6b63378a58a18b932870be",
+  "bucket_commit_roll": "395908b27d7f092769d860dc16aaad9fda1eab31f1831b930020dfebff19148d",
+  "bucket_commit_xor": "6f23a8995ea6e9f4cf8569e24aa5ff8dc15f081173facdbefd92ceb772293fee",
+  "digest_size": 32,
+  "records_checked": 815273437,
+  "params": {
+    "INIT_BITS": 30,
+    "MOD_BITS": 40,
+    "MAX_DEPTH": 300,
+    "BASIN_CUTOFF": 1000000
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "INIT_BITS": 30,
+  "MOD_BITS": 40,
+  "MAX_DEPTH": 300,
+  "BASIN_CUTOFF": 1000000,
+  "BATCH_SIZE": 1000000,
+  "any_monster": false,
+  "deepest_depth_overall": 237,
+  "global_max_v2": 30,
+  "global_uncovered": 274972,
+  "global_hash_roll": "c282e407ec485795cb8dbcc88e4e532134639d7c694cf0bd8ce461f871a30e10",
+  "global_hash_xor": "ebad0dd211310f9a62965298dd25f2b2e2730dc0688c65c92d59a6238db02ad7",
+  "hash_algo": "blake2b",
+  "hash_digest_size": 32,
+  "hash_include_A": true,
+  "coq_bucket_written": true,
+  "coq_bucket_per_batch": true,
+  "coq_bucket_glue_written": true
+}

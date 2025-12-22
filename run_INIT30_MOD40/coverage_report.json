@@ -1,0 +1,13 @@
+{
+  "coverage_ok": true,
+  "total_seeds": 1073741824,
+  "uncovered_count": 274972,
+  "covered_by_bucket": 1073466852,
+  "failures": 0,
+  "first_fail_seed": null,
+  "k_bound": 237,
+  "index_file": "/home/julian/Desktop/collatz/Convergence_Exploration_of_Collatz-1.1.0/run_INIT30_MOD40/bucket_keys_u64.sorted.uniq.bin",
+  "index_sha256": "99308a7b6c7ac8641769675a7f90239bb825a7e20b659d4444770653ba04fcf5",
+  "uncovered_file": "/home/julian/Desktop/collatz/Convergence_Exploration_of_Collatz-1.1.0/run_INIT30_MOD40/recheck_uncovered_witnesses.jsonl",
+  "uncovered_sha256": "2ecd2c00d4d31c57386fdb3f447f02e09185196f65d19d30135837ff3fdc1bd1"
+}

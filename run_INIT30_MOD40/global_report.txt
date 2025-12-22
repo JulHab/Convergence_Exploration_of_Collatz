@@ -1,4 +1,0 @@
-any_monster=False
-deepest_depth_overall=237
-best_batch_range=(63000000, 64000000)
-global_max_v2=6
