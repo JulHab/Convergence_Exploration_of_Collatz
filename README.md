@@ -158,8 +158,8 @@ Verify SHA-256 hashes against those recorded in the paper.
 ### Coq verification
 ```
 make
-```S
-ccessful compilation of MainTheorem.v confirms:
+```
+Successful compilation of MainTheorem.v confirms:
 
 Collatz_converges_from_acceptance
 
