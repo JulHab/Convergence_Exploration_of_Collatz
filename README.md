@@ -94,8 +94,7 @@ No part of the argument depends on hidden computation.
 ---
 
 ## Repository Structure
-
-.
+```
 Convergence_Exploration_of_Collatz-1.1.0/
 │
 ├── collatz-coq/ # Coq formalization
@@ -134,8 +133,7 @@ Convergence_Exploration_of_Collatz-1.1.0/
 ├── hashes.txt # SHA-256 fingerprints of key artifacts
 ├── README.md # project overview and reproduction steps
 └── Symbolic_and_Computational_Exploration_of_the_Collatz_Map.pdf
----
-
+```
 ## Reproducibility
 
 ### Requirements
