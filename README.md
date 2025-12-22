@@ -143,24 +143,23 @@ Convergence_Exploration_of_Collatz-1.1.0/
 - Sufficient disk space (certificate files are large)
 
 ### Certificate verification
-
+```
 python verify_certificate.py \
   --dir run_INIT30_MOD40 \
   --build-index \
   --check-coverage
-
-This produces:
-
+```
+This produces
 - bucket_acceptance.json
 - coverage_report.json
 
 Verify SHA-256 hashes against those recorded in the paper.
 
 ### Coq verification
-
+```
 make
-
-Successful compilation of MainTheorem.v confirms:
+```S
+ccessful compilation of MainTheorem.v confirms:
 
 Collatz_converges_from_acceptance
 
