@@ -125,11 +125,11 @@ Convergence_Exploration_of_Collatz-1.1.0/
 │ ├── report.json
 │ └── tmp_keys/ # temporary chunk files (optional, can be deleted)
 │
-│
-├── verify_certificate.py # certificate validity + coverage checker (RAM-safe)
-├── recheck_uncovered.py # uncovered-seed recheck tooling
-├── monster_collatz_search.py # “monster” search / diagnostics
-├── minimize_from_v_sqlite.py # minimizer tooling (SQLite-based)
+├── /tools
+| ├── verify_certificate.py # certificate validity + coverage checker (RAM-safe)
+| ├── recheck_uncovered.py # uncovered-seed recheck tooling
+| ├── monster_collatz_search.py # “monster” search / diagnostics
+│ └──minimize_from_v_sqlite.py # minimizer tooling (SQLite-based)
 ├── hashes.txt # SHA-256 fingerprints of key artifacts
 ├── README.md # project overview and reproduction steps
 └── Symbolic_and_Computational_Exploration_of_the_Collatz_Map.pdf
@@ -144,7 +144,7 @@ Convergence_Exploration_of_Collatz-1.1.0/
 
 ### Certificate verification
 ```
-python verify_certificate.py \
+python /tools/verify_certificate.py \
   --dir run_INIT30_MOD40 \
   --build-index \
   --check-coverage
