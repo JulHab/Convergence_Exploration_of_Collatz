@@ -199,6 +199,7 @@ Those distinctions are intentional and documented.
 
 If you reference this work, please cite the accompanying paper and repository.  
 A Zenodo DOI is provided for archival stability.
+https://zenodo.org/records/18033896
 
 ---
 
